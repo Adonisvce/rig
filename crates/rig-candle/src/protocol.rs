@@ -149,6 +149,11 @@ fn validate_protocol_inputs(
                                 protocol,
                             )?;
                         }
+                        AssistantContent::UnparsedToolCall(_) => {
+                            return Err(CandleError::UnsupportedPromptContent(
+                                "unparsed tool arguments",
+                            ));
+                        }
                         AssistantContent::Image(_) => {}
                     }
                 }
@@ -426,7 +431,7 @@ fn render_plain_message(message: &Message) -> Result<(&'static str, String), Can
             for item in content.iter() {
                 match item {
                     AssistantContent::Text(text) => parts.push(text.text.clone()),
-                    AssistantContent::ToolCall(_) => {
+                    AssistantContent::ToolCall(_) | AssistantContent::UnparsedToolCall(_) => {
                         return Err(CandleError::UnsupportedPromptContent("tool calls"));
                     }
                     AssistantContent::Reasoning(_) => {
@@ -605,6 +610,11 @@ fn render_qwen_message(
                         rendered.push('\n');
                         rendered.push_str(TOOL_CALL_END);
                         call_count += 1;
+                    }
+                    AssistantContent::UnparsedToolCall(_) => {
+                        return Err(CandleError::UnsupportedPromptContent(
+                            "unparsed tool arguments",
+                        ));
                     }
                     AssistantContent::Image(_) => {
                         return Err(CandleError::UnsupportedPromptContent(

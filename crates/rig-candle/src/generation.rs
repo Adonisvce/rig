@@ -667,6 +667,11 @@ pub(crate) fn stream_generate(
                     })?;
                 }
             }
+            AssistantContent::UnparsedToolCall(_) => {
+                return Err(CandleError::Inference(
+                    "text-only Qwen output parser produced unparsed tool arguments".to_owned(),
+                ));
+            }
             AssistantContent::Image(_) => {
                 return Err(CandleError::Inference(
                     "text-only Qwen output parser produced image content".to_string(),

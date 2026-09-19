@@ -392,6 +392,9 @@ impl HeuristicTokenCounter {
                 let args_bytes = call.function.arguments.to_string().len();
                 self.bytes_to_tokens(name_bytes + args_bytes)
             }
+            AssistantContent::UnparsedToolCall(call) => {
+                self.bytes_to_tokens(call.function.name.len() + call.function.arguments.len())
+            }
             AssistantContent::Image(_) => self.per_attachment_tokens,
         }
     }

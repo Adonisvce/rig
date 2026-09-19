@@ -103,6 +103,11 @@ impl TryFrom<RigMessage> for vertexai::model::Content {
                         AssistantContent::Text(Text { text, .. }) => {
                             Ok(vertexai::model::Part::new().set_text(text))
                         }
+                        AssistantContent::UnparsedToolCall(_) => {
+                            Err(CompletionError::ProviderError(
+                                "Vertex AI does not support unparsed tool arguments".to_owned(),
+                            ))
+                        }
                         AssistantContent::Image(image) => vertex_assistant_image_part(image),
                         AssistantContent::ToolCall(tool_call) => {
                             let struct_val = match tool_call.function.arguments {
