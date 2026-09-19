@@ -133,6 +133,8 @@ pub enum AssistantContent {
     Text(Text),
     /// Tool call requested by the assistant.
     ToolCall(ToolCall),
+    /// Unparsed tool-call history. This is not an executable tool call.
+    UnparsedToolCall(ToolCall<String>),
     /// Structured reasoning emitted by the assistant.
     Reasoning(Reasoning),
     /// Image content emitted by the assistant.
@@ -568,7 +570,7 @@ impl TryFrom<ProviderCallIdWire> for ProviderCallId {
 
 /// Describes a tool call with an id and function to call, generally produced by a provider.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-pub struct ToolCall {
+pub struct ToolCall<A = serde_json::Value> {
     /// Rig's correlation handle. Always present; minted when the provider
     /// issued none.
     pub id: ToolCallId,
@@ -578,8 +580,8 @@ pub struct ToolCall {
     /// older Ollama daemons).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<ProviderCallId>,
-    /// Function name and JSON arguments requested by the model.
-    pub function: ToolFunction,
+    /// Function name and arguments; structured JSON by default, raw text for unparsed history.
+    pub function: ToolFunction<A>,
     /// Optional cryptographic signature for the tool call.
     ///
     /// This field is used by some providers (e.g., Google) to provide a signature
@@ -596,8 +598,8 @@ pub struct ToolCall {
     pub additional_params: Option<serde_json::Value>,
 }
 
-impl ToolCall {
-    fn assemble(provider: Option<ProviderCallId>, function: ToolFunction) -> Self {
+impl<A> ToolCall<A> {
+    fn assemble(provider: Option<ProviderCallId>, function: ToolFunction<A>) -> Self {
         Self {
             id: ToolCallId::for_provider(provider.as_ref()),
             provider,
@@ -608,7 +610,7 @@ impl ToolCall {
     }
 
     /// A call with an explicit correlation handle and no provider-issued id.
-    pub fn new(id: ToolCallId, function: ToolFunction) -> Self {
+    pub fn new(id: ToolCallId, function: ToolFunction<A>) -> Self {
         Self {
             id,
             ..Self::assemble(None, function)
@@ -617,7 +619,7 @@ impl ToolCall {
 
     /// The single-identifier provider boundary: adopt the wire's id when it
     /// issued one, mint when it did not (empty or absent ids mint).
-    pub fn from_wire(wire_id: impl Into<String>, function: ToolFunction) -> Self {
+    pub fn from_wire(wire_id: impl Into<String>, function: ToolFunction<A>) -> Self {
         Self::assemble(ProviderCallId::new(wire_id), function)
     }
 
@@ -627,7 +629,7 @@ impl ToolCall {
     pub fn from_dual_wire(
         item_id: impl Into<String>,
         call_id: impl Into<String>,
-        function: ToolFunction,
+        function: ToolFunction<A>,
     ) -> Self {
         let provider =
             ProviderCallId::new(call_id).map(|provider| provider.with_item_id(item_id.into()));
@@ -666,16 +668,16 @@ impl ToolCall {
 
 /// Describes a tool function to call with a name and arguments, generally produced by a provider.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-pub struct ToolFunction {
+pub struct ToolFunction<A = serde_json::Value> {
     /// Tool/function name to invoke.
     pub name: String,
-    /// JSON arguments for the tool/function.
-    pub arguments: serde_json::Value,
+    /// Arguments: structured JSON by default, or exact text in unparsed history.
+    pub arguments: A,
 }
 
-impl ToolFunction {
+impl<A> ToolFunction<A> {
     /// Create a tool function call payload.
-    pub fn new(name: String, arguments: serde_json::Value) -> Self {
+    pub fn new(name: String, arguments: A) -> Self {
         Self { name, arguments }
     }
 }

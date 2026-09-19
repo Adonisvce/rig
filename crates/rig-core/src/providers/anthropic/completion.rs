@@ -1118,6 +1118,9 @@ fn anthropic_content_from_assistant_content(
             }
             Ok(vec![anthropic_text_content_from_message_text(text)?])
         }
+        message::AssistantContent::UnparsedToolCall(_) => Err(MessageError::ConversionError(
+            "Unparsed tool-call history is unsupported by this provider".into(),
+        )),
         message::AssistantContent::Image(_) => Err(MessageError::ConversionError(
             "Anthropic currently doesn't support images.".to_string(),
         )),

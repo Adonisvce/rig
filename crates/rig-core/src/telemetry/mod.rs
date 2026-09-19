@@ -646,6 +646,11 @@ fn assistant_parts(content: &[AssistantContent]) -> Vec<TelemetryPart> {
                 arguments: tool_call.function.arguments.clone(),
             }],
             AssistantContent::Reasoning(reasoning) => reasoning_parts(reasoning),
+            AssistantContent::UnparsedToolCall(call) => vec![TelemetryPart::ToolCall {
+                id: Some(call.id.as_str().to_owned()),
+                name: call.function.name.clone(),
+                arguments: serde_json::Value::String(call.function.arguments.clone()),
+            }],
             AssistantContent::Image(image) => image_part(image).into_iter().collect(),
         })
         .collect()

@@ -1026,7 +1026,8 @@ fn choice_is_empty(choice: &[completion::AssistantContent]) -> bool {
         completion::AssistantContent::Text(text) => text.text.trim().is_empty(),
         completion::AssistantContent::Reasoning(reasoning) => reasoning.content.is_empty(),
         completion::AssistantContent::Image(_) => false,
-        completion::AssistantContent::ToolCall(_) => false,
+        completion::AssistantContent::ToolCall(_)
+        | completion::AssistantContent::UnparsedToolCall(_) => false,
     })
 }
 

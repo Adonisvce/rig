@@ -797,13 +797,11 @@ impl crate::completion::NormalizeCompletionResponse for CompletionResponse {
                     normalized_content.push(completion::AssistantContent::text(refusal));
                 }
 
-                normalized_content.extend(tool_calls.iter().map(|call| {
-                    completion::AssistantContent::tool_call(
-                        &call.id,
-                        &call.function.name,
-                        call.function.arguments.clone(),
-                    )
-                }));
+                normalized_content.extend(
+                    tool_calls
+                        .iter()
+                        .map(|call| completion::AssistantContent::from(call.clone())),
+                );
 
                 normalized_content.extend(images.iter().map(response_image_to_assistant_content));
 
@@ -1289,6 +1287,11 @@ fn assistant_contents_to_messages(
                 // OpenRouter generated images are response artifacts. They remain
                 // visible in Rig history, but OpenRouter does not define them as
                 // replayable assistant request content.
+            }
+            message::AssistantContent::UnparsedToolCall(_) => {
+                return Err(message::MessageError::ConversionError(
+                    "Unparsed tool-call history is unsupported by this provider".into(),
+                ));
             }
             message::AssistantContent::Image(_) => {
                 return Err(message::MessageError::ConversionError(

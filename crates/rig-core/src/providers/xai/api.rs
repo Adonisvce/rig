@@ -450,6 +450,12 @@ impl TryFrom<RigMessage> for Vec<Message> {
                                 items.push(item);
                             }
                         }
+                        AssistantContent::UnparsedToolCall(_) => {
+                            return Err(crate::message::MessageError::ConversionError(
+                                "Unparsed tool-call history is unsupported by this provider".into(),
+                            )
+                            .into());
+                        }
                         AssistantContent::Image(_) => {
                             return Err(CompletionError::RequestError(
                                 "xAI does not support images in assistant content".into(),

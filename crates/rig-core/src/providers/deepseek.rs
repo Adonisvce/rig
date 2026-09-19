@@ -753,6 +753,7 @@ mod tests {
                 crate::completion::AssistantContent::ToolCall(_) => "tool_call",
                 crate::completion::AssistantContent::Reasoning(_) => "reasoning",
                 crate::completion::AssistantContent::Image(_) => "image",
+                crate::completion::AssistantContent::UnparsedToolCall(_) => "unparsed_tool_call",
             })
             .collect()
     }

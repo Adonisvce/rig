@@ -1717,6 +1717,7 @@ fn assert_reasoning_tool_reasoning(
             }
             AssistantContent::Text(text) => format!("text:{}", text.text),
             AssistantContent::Image(_) => "image".to_string(),
+            AssistantContent::UnparsedToolCall(_) => "unparsed_tool_call".to_string(),
         })
         .collect();
     let expected = vec![

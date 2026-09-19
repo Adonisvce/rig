@@ -780,7 +780,7 @@ pub(crate) fn turn_delivered_no_answer(choice: &[AssistantContent]) -> bool {
         AssistantContent::ToolCall(_) => true,
         AssistantContent::Image(_) => true,
         // The one exclusion: scratch work, not an answer.
-        AssistantContent::Reasoning(_) => false,
+        AssistantContent::Reasoning(_) | AssistantContent::UnparsedToolCall(_) => false,
     })
 }
 

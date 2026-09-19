@@ -1272,6 +1272,11 @@ impl TryFrom<crate::message::Message> for Vec<Message> {
                                 thinking = Some(display);
                             }
                         }
+                        crate::message::AssistantContent::UnparsedToolCall(_) => {
+                            return Err(crate::message::MessageError::ConversionError(
+                                "Unparsed tool-call history is unsupported by this provider".into(),
+                            ));
+                        }
                         crate::message::AssistantContent::Image(_) => {
                             return Err(crate::message::MessageError::ConversionError(
                                 "Ollama currently doesn't support images.".into(),

@@ -587,11 +587,50 @@ impl TryFrom<crate::message::ToolChoice> for ToolChoice {
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 pub struct Function {
     pub name: String,
-    #[serde(
-        serialize_with = "json_utils::stringified_json::serialize",
-        deserialize_with = "json_utils::stringified_json::deserialize_maybe_stringified"
-    )]
-    pub arguments: serde_json::Value,
+    pub arguments: ChatArguments,
+}
+
+/// Chat arguments distinguish structured JSON from unparsed history text.
+#[derive(Debug, PartialEq, Clone)]
+pub enum ChatArguments {
+    /// Parsed arguments; JSON strings keep their JSON quotes.
+    Json(serde_json::Value),
+    /// Unparsed history; replay exact text without interpreting it.
+    Raw(String),
+}
+impl serde::Serialize for ChatArguments {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Json(value) => json_utils::stringified_json::serialize(value, serializer),
+            Self::Raw(text) => serializer.serialize_str(text),
+        }
+    }
+}
+impl<'de> serde::Deserialize<'de> for ChatArguments {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Provider responses remain strict: this correction permits raw history
+        // replay, not execution of malformed provider arguments.
+        json_utils::stringified_json::deserialize_maybe_stringified(deserializer).map(Self::Json)
+    }
+}
+impl From<serde_json::Value> for ChatArguments {
+    fn from(value: serde_json::Value) -> Self {
+        Self::Json(value)
+    }
+}
+impl From<ToolCall> for message::AssistantContent {
+    fn from(call: ToolCall) -> Self {
+        match call.function.arguments {
+            ChatArguments::Json(arguments) => Self::ToolCall(message::ToolCall::from_wire(
+                call.id,
+                message::ToolFunction::new(call.function.name, arguments),
+            )),
+            ChatArguments::Raw(arguments) => Self::UnparsedToolCall(message::ToolCall::from_wire(
+                call.id,
+                message::ToolFunction::new(call.function.name, arguments),
+            )),
+        }
+    }
 }
 
 impl TryFrom<message::ToolResult> for Message {
@@ -859,7 +898,15 @@ pub fn assistant_content_to_messages(
     for content in value {
         match content {
             message::AssistantContent::Text(text) => text_content.push(text),
-            message::AssistantContent::ToolCall(tool_call) => tool_calls.push(tool_call),
+            message::AssistantContent::ToolCall(tool_call) => tool_calls.push(tool_call.into()),
+            message::AssistantContent::UnparsedToolCall(tool_call) => tool_calls.push(ToolCall {
+                id: tool_call.wire_call_id().to_owned(),
+                r#type: ToolType::default(),
+                function: Function {
+                    name: tool_call.function.name,
+                    arguments: ChatArguments::Raw(tool_call.function.arguments),
+                },
+            }),
             message::AssistantContent::Reasoning(reasoning) => {
                 let display = reasoning.display_text();
                 if !display.is_empty() {
@@ -875,7 +922,7 @@ pub fn assistant_content_to_messages(
         }
     }
 
-    if text_content.is_empty() && tool_calls.is_empty() {
+    if text_content.is_empty() && tool_calls.is_empty() && reasoning_parts.is_empty() {
         return Ok(vec![]);
     }
 
@@ -892,10 +939,7 @@ pub fn assistant_content_to_messages(
         refusal: None,
         audio: None,
         name: None,
-        tool_calls: tool_calls
-            .into_iter()
-            .map(|tool_call| tool_call.into())
-            .collect::<Vec<_>>(),
+        tool_calls,
         reasoning_details: Vec::new(),
         images: Vec::new(),
     }])
@@ -924,21 +968,9 @@ impl From<message::ToolCall> for ToolCall {
             r#type: ToolType::default(),
             function: Function {
                 name: tool_call.function.name,
-                arguments: tool_call.function.arguments,
+                arguments: tool_call.function.arguments.into(),
             },
         }
-    }
-}
-
-impl From<ToolCall> for message::ToolCall {
-    fn from(tool_call: ToolCall) -> Self {
-        message::ToolCall::from_wire(
-            tool_call.id,
-            message::ToolFunction {
-                name: tool_call.function.name,
-                arguments: tool_call.function.arguments,
-            },
-        )
     }
 }
 
@@ -986,7 +1018,7 @@ impl TryFrom<Message> for message::Message {
                 assistant_content.extend(
                     tool_calls
                         .into_iter()
-                        .map(|tool_call| Ok(message::AssistantContent::ToolCall(tool_call.into())))
+                        .map(|tool_call| Ok(message::AssistantContent::from(tool_call)))
                         .collect::<Result<Vec<_>, _>>()?,
                 );
 
@@ -1213,13 +1245,11 @@ impl crate::completion::NormalizeCompletionResponse for CompletionResponse {
                         content.push(completion::AssistantContent::reasoning(reasoning));
                     }
 
-                    content.extend(tool_calls.iter().map(|call| {
-                        completion::AssistantContent::tool_call(
-                            &call.id,
-                            &call.function.name,
-                            call.function.arguments.clone(),
-                        )
-                    }));
+                    content.extend(
+                        tool_calls
+                            .iter()
+                            .map(|call| completion::AssistantContent::from(call.clone())),
+                    );
                     Some(content)
                 }
                 _ => None,
@@ -2901,13 +2931,16 @@ mod tests {
     }
 
     #[test]
-    fn assistant_reasoning_alone_is_dropped() {
+    fn assistant_reasoning_alone_is_retained() {
         let assistant_content = vec![message::AssistantContent::reasoning("hidden")];
 
         let converted: Vec<Message> =
             assistant_content_to_messages(assistant_content).expect("conversion should work");
 
-        assert!(converted.is_empty());
+        assert_eq!(converted.len(), 1);
+        assert!(
+            matches!(converted.first(), Some(Message::Assistant { reasoning: Some(text), .. }) if text == "hidden")
+        );
     }
 
     // Regression test: providers that serve thinking models over the OpenAI
@@ -2948,7 +2981,7 @@ mod tests {
                 assert_eq!(tool_calls[0].function.name, "subtract");
                 assert_eq!(
                     tool_calls[0].function.arguments,
-                    serde_json::json!({"x": 2, "y": 1})
+                    serde_json::json!({"x": 2, "y": 1}).into()
                 );
                 assert_eq!(reasoning.as_deref(), Some("hidden"));
             }
@@ -3776,7 +3809,7 @@ mod tests {
         assert_eq!(tool_calls[0].function.name, "hello_world");
         assert_eq!(
             tool_calls[0].function.arguments,
-            serde_json::json!({"city": "Paris"})
+            serde_json::json!({"city": "Paris"}).into()
         );
     }
 
@@ -3815,7 +3848,7 @@ mod tests {
         assert_eq!(tool_calls[0].function.name, "hello_world");
         assert_eq!(
             tool_calls[0].function.arguments,
-            serde_json::json!({"city": "Paris"})
+            serde_json::json!({"city": "Paris"}).into()
         );
     }
 
@@ -4013,20 +4046,23 @@ mod tests {
         let Message::Assistant { tool_calls, .. } = &response.choices[0].message else {
             panic!("expected assistant message");
         };
-        assert_eq!(tool_calls[0].function.arguments, serde_json::json!({}));
+        assert_eq!(
+            tool_calls[0].function.arguments,
+            serde_json::json!({}).into()
+        );
         assert_eq!(
             tool_calls[1].function.arguments,
-            serde_json::json!({"city": "Paris"})
+            serde_json::json!({"city": "Paris"}).into()
         );
         assert_eq!(
             tool_calls[2].function.arguments,
-            serde_json::Value::Null,
+            ChatArguments::Json(serde_json::Value::Null),
             "Groq's `\"null\"` spelling parses, so the call survives untouched — \
              which is exactly why `null` cannot be a truncation sentinel"
         );
         assert_eq!(
             tool_calls[3].function.arguments,
-            serde_json::Value::Null,
+            ChatArguments::Json(serde_json::Value::Null),
             "and the same for a bare JSON null in the non-string branch"
         );
 

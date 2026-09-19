@@ -1235,6 +1235,11 @@ pub mod gemini_api_types {
         fn try_from(content: message::AssistantContent) -> Result<Self, Self::Error> {
             match content {
                 message::AssistantContent::Text(message::Text { text, .. }) => Ok(text.into()),
+                message::AssistantContent::UnparsedToolCall(_) => {
+                    Err(MessageError::ConversionError(
+                        "Unparsed tool-call history is unsupported by this provider".into(),
+                    ))
+                }
                 message::AssistantContent::Image(image) => image_to_part(image),
                 message::AssistantContent::ToolCall(tool_call) => Ok(tool_call.into()),
                 message::AssistantContent::Reasoning(reasoning) => Ok(Part {

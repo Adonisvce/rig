@@ -417,7 +417,7 @@ mod tests {
                         r#type: ToolType::Function,
                         function: Function {
                             name: "subtract".to_string(),
-                            arguments: serde_json::json!({"x": 2, "y": 5}),
+                            arguments: serde_json::json!({"x": 2, "y": 5}).into(),
                         },
                     }
                 );

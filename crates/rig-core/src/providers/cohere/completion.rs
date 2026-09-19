@@ -469,6 +469,11 @@ impl TryFrom<message::Message> for Vec<Message> {
                             let thinking = reasoning.display_text();
                             text_content.push(AssistantContent::Thinking { thinking });
                         }
+                        message::AssistantContent::UnparsedToolCall(_) => {
+                            return Err(message::MessageError::ConversionError(
+                                "Unparsed tool-call history is unsupported by this provider".into(),
+                            ));
+                        }
                         message::AssistantContent::Image(_) => {
                             return Err(message::MessageError::ConversionError(
                                 "Cohere currently doesn't support images.".to_owned(),

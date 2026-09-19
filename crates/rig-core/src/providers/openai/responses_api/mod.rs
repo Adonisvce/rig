@@ -617,6 +617,12 @@ impl TryFrom<crate::completion::Message> for Vec<InputItem> {
                                 });
                             }
                         }
+                        crate::message::AssistantContent::UnparsedToolCall(_) => {
+                            return Err(message::MessageError::ConversionError(
+                                "Unparsed tool-call history is unsupported by this provider".into(),
+                            )
+                            .into());
+                        }
                         crate::message::AssistantContent::Image(_) => {
                             return Err(CompletionError::ProviderError(
                                 "Assistant image content is not supported in OpenAI Responses API"

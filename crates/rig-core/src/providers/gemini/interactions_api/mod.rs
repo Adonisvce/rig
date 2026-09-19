@@ -1945,6 +1945,11 @@ pub mod interactions_api_types {
                         summary: Some(summary),
                     }))
                 }
+                message::AssistantContent::UnparsedToolCall(_) => {
+                    Err(message::MessageError::ConversionError(
+                        "Unparsed tool-call history is unsupported by this provider".into(),
+                    ))
+                }
                 message::AssistantContent::Image(message::Image {
                     data, media_type, ..
                 }) => {
