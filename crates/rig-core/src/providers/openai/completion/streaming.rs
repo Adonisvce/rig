@@ -51,27 +51,16 @@ impl From<&StreamingToolCall> for CompatibleToolCallChunk {
     }
 }
 
-fn deserialize_delta_content<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    // Some compatible providers (e.g. Mistral's reasoning models) stream
-    // delta content as an array of content parts rather than a string.
-    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
-    Ok(value.and_then(|value| match value {
-        serde_json::Value::String(text) => Some(text),
-        serde_json::Value::Array(parts) => {
-            let text = crate::providers::openai::completion::joined_text_parts(&parts);
-            (!text.is_empty()).then_some(text)
-        }
-        _ => None,
-    }))
-}
-
 #[derive(Deserialize, Debug, Default)]
 struct StreamingDelta {
-    #[serde(default, deserialize_with = "deserialize_delta_content")]
-    content: Option<String>,
+    // Retain the wire value until classification: folding arrays into text here
+    // would irreversibly erase unsupported assistant image/audio parts.
+    #[serde(default)]
+    content: Option<serde_json::Value>,
+    #[serde(default)]
+    images: Option<serde_json::Value>,
+    #[serde(default)]
+    audio: Option<serde_json::Value>,
     /// A structured-output refusal streams here, on its own key, with
     /// `content` held at `null` for the whole turn — the same sibling-of-
     /// `content` spelling the unary path sees. Its deltas are the turn's
@@ -90,6 +79,27 @@ struct StreamingDelta {
     tool_calls: Vec<StreamingToolCall>,
     #[serde(default, deserialize_with = "json_utils::null_or_default")]
     reasoning_details: Vec<serde_json::Value>,
+}
+
+impl StreamingDelta {
+    fn has_unmodeled_content(&self) -> bool {
+        let nonempty = |value: &serde_json::Value| match value {
+            serde_json::Value::Null => false,
+            serde_json::Value::Array(values) => !values.is_empty(),
+            serde_json::Value::Object(values) => !values.is_empty(),
+            serde_json::Value::String(value) => !value.is_empty(),
+            _ => true,
+        };
+        self.images.as_ref().is_some_and(nonempty)
+            || self.audio.as_ref().is_some_and(nonempty)
+            || self.content.as_ref().is_some_and(|content| match content {
+                serde_json::Value::String(_) => false,
+                serde_json::Value::Array(parts) => parts.iter().any(|part| {
+                    part.get("type").and_then(serde_json::Value::as_str) != Some("text")
+                }),
+                _ => true,
+            })
+    }
 }
 
 #[derive(Deserialize, Debug, PartialEq)]
@@ -142,8 +152,16 @@ pub(crate) fn map_finish_reason(reason: Option<&FinishReason>) -> CompatibleFini
 /// instead of vanishing. An empty `content` string with no refusal to fall
 /// back on stays exactly as it was.
 fn delta_text(delta: &StreamingDelta) -> Option<String> {
-    match delta.content.as_deref() {
-        Some(content) if !content.is_empty() => delta.content.clone(),
+    let content = delta.content.as_ref().and_then(|value| match value {
+        serde_json::Value::String(text) => Some(text.clone()),
+        serde_json::Value::Array(parts) => {
+            let text = super::joined_text_parts(parts);
+            (!text.is_empty()).then_some(text)
+        }
+        _ => None,
+    });
+    match content.as_deref() {
+        Some(text) if !text.is_empty() => content.clone(),
         content => delta
             .refusal
             .clone()
@@ -458,7 +476,26 @@ where
     ) -> wire::WireEvent<CompatibleChunk<Self::Usage, Self::Detail>> {
         // Classification only — the unknown/corrupt policy (warn-skip vs.
         // in-band `Err` item) lives in the shared driver, not here.
-        wire::classify_chat_completions_frame::<StreamingCompletionChunk<U>>(data).map(|data| {
+        let classified = wire::classify_chat_completions_frame::<StreamingCompletionChunk<U>>(data);
+        if let wire::WireEvent::Known(chunk) = &classified
+            && chunk
+                .choices
+                .iter()
+                .find(|choice| choice.index.is_none_or(|index| index == 0))
+                .is_some_and(|choice| choice.delta.has_unmodeled_content())
+        {
+            // Preserve the entire mixed frame on the existing passthrough channel.
+            // The consumer decides whether it supports the content; never turn it
+            // into a successful text-only response. Decode errors remain errors.
+            return match serde_json::from_str(data) {
+                Ok(value) => wire::WireEvent::Unknown {
+                    event_type: "chat.completion.unmodeled_content".into(),
+                    value: streaming::UnknownPayload::new(value),
+                },
+                Err(error) => wire::WireEvent::Corrupt(error),
+            };
+        }
+        classified.map(|data| {
             // `n > 1` streams as interleaved chunks distinguished only by
             // `choices[].index`. Taking each *chunk's* first choice would
             // concatenate every candidate into one garbled answer, while the
@@ -691,6 +728,59 @@ mod tests {
         }
 
         (text, terminal)
+    }
+
+    /// Controlled protocol regression: these adversarial mixed-content frames
+    /// cannot be requested deterministically from a live text-only model.
+    #[tokio::test]
+    async fn streamed_multimedia_reaches_normalized_unknown_without_loss() {
+        use crate::test_utils::MockStreamingClient;
+        use futures::StreamExt;
+        let image = json!({"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}});
+        for delta in [
+            json!({"content":[image.clone()]}),
+            json!({"content":[{"type":"text","text":"visible"},image.clone()]}),
+            json!({"images":[image.clone()]}),
+            json!({"content":"visible","images":[image]}),
+            json!({"audio":{"data":"AAAA"}}),
+            json!({"content":"visible","audio":{"data":"AAAA"}}),
+        ] {
+            let frame =
+                json!({"choices":[{"index":0,"delta":delta,"finish_reason":null}]}).to_string();
+            let terminal = r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#;
+            let client = MockStreamingClient {
+                sse_bytes: sse_bytes_from_data_lines([frame.as_str(), terminal, "[DONE]"]),
+            };
+            let mut stream =
+                send_compatible_streaming_request(client, streaming_request(), "openai")
+                    .await
+                    .unwrap();
+            let first = stream.next().await.unwrap().unwrap();
+            let streaming::StreamedAssistantContent::Unknown(payload) = first else {
+                panic!("multimedia did not reach the normalized unknown channel");
+            };
+            assert_eq!(
+                payload.value(),
+                &serde_json::from_str::<serde_json::Value>(&frame).unwrap()
+            );
+            assert!(!format!("{payload:?}").contains("AAAA"));
+        }
+    }
+
+    /// Controlled wire-shape controls for the multimedia classification boundary.
+    #[tokio::test]
+    async fn multimedia_classification_preserves_text_arrays_and_empty_fields() {
+        let text = r#"{"choices":[{"index":0,"delta":{"content":[{"type":"text","text":"hello"},{"type":"text","text":" world"}],"images":[],"audio":null},"finish_reason":null}]}"#;
+        let empty = r#"{"choices":[{"index":0,"delta":{"content":null,"images":null,"audio":{}},"finish_reason":null}]}"#;
+        let other_candidate = r#"{"choices":[{"index":1,"delta":{"images":[{"url":"other candidate"}]},"finish_reason":null},{"index":0,"delta":{"content":"!"},"finish_reason":null}]}"#;
+        let terminal = r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#;
+        let (text, terminal) =
+            collect_openai_stream(&[text, empty, other_candidate, terminal]).await;
+        assert_eq!(text, "hello world!");
+        assert_eq!(
+            terminal.unwrap().finish_reason,
+            Some(NormalizedFinishReason::Stop)
+        );
     }
 
     /// Replay Chat Completions chunks without normalizing the terminal, so
@@ -1034,7 +1124,7 @@ mod tests {
             "tool_calls": null
         }"#;
         let delta: StreamingDelta = serde_json::from_str(json).unwrap();
-        assert_eq!(delta.content, Some("Hello".to_string()));
+        assert_eq!(delta.content, Some(json!("Hello")));
         assert!(delta.tool_calls.is_empty());
     }
 
@@ -1055,7 +1145,7 @@ mod tests {
         }"#;
         let chunk: StreamingCompletionChunk = serde_json::from_str(json).unwrap();
         assert_eq!(chunk.choices.len(), 1);
-        assert_eq!(chunk.choices[0].delta.content, Some("Hello".to_string()));
+        assert_eq!(chunk.choices[0].delta.content, Some(json!("Hello")));
         assert!(chunk.usage.is_some());
     }
 
